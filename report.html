@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TP05 Report: Real-Time Data Streaming with Apache Kafka</title>
+<style>
+:root{--bg:#fbfbfa;--ink:#1b2430;--mute:#5b6672;--line:#d8dde2;--acc:#0f5c63;--code:#eef2f3;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#161b20;--ink:#e6eaee;--mute:#9aa6b2;--line:#2c353d;--acc:#6cc3cb;--code:#1f272e}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:820px;margin:0 auto;padding:48px 22px 80px}
+h1{font-size:2rem;line-height:1.2;margin:0 0 .4rem}
+h2{font-size:1.4rem;margin:3rem 0 .8rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font-size:1.05rem;margin:1.8rem 0 .4rem;color:var(--acc)}
+p{margin:.6rem 0}
+.meta{color:var(--mute);font-size:.95rem;margin:0 0 1.6rem}
+code,pre{font-family:Consolas,"Courier New",monospace;font-size:.88rem}
+code{background:var(--code);padding:1px 5px;border-radius:3px}
+pre{background:var(--code);padding:14px 16px;border-radius:4px;overflow-x:auto;line-height:1.5}
+figure{margin:1.2rem 0;break-inside:avoid}
+figure img{display:block;max-width:100%;height:auto;border:1px solid var(--line);border-radius:3px}
+figcaption{font-size:.88rem;color:var(--mute);margin-top:.4rem}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:640px){.pair{grid-template-columns:1fr}}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+dt{font-weight:bold;margin-top:.6rem}
+dd{margin:0 0 0 1.2rem}
+a{color:var(--acc)}
+@media print{body{font-size:12pt;background:#fff;color:#000}main{padding:0}h2{break-after:avoid}pre,table{break-inside:avoid}}
+</style>
+</head>
+<body>
+<main>
+
+<h1>TP05: Real-Time Data Streaming and Processing Using Apache Kafka</h1>
+<p class="meta">University of Eloued, Faculty of Exact Sciences. Master 2 IA &amp; Data Science, Big Data Analytics, 2026/2027.</p>
+
+<p>A smart-campus system produces temperature and humidity readings continuously. Storing them only in files delays analysis and prevents several applications from reading the same events. In this lab, simulated sensors publish JSON events to a Kafka topic, and a Python consumer reads the stream in real time and raises an alert when the temperature reaches 35°C or more. The data is synthetic.</p>
+
+<pre>producer.py  →  Kafka broker (Docker, localhost:9092)  →  consumer.py
+(sensor sim.)   topic: campus-sensors (3 partitions)       (parses JSON, ALERT if T ≥ 35°C)
+                ├ Partition 0
+                ├ Partition 1
+                └ Partition 2</pre>
+
+<h2>Setup</h2>
+<p>Kafka 3.9.1 runs in KRaft mode (broker and controller in one node) from <code>compose.yaml</code>. The Python client is <code>kafka-python</code> inside a virtual environment.</p>
+<pre>docker compose up -d
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+docker exec -it tp05-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic campus-sensors --partitions 3 --replication-factor 1</pre>
+
+<h2>Evidence</h2>
+
+<h3>Running container</h3>
+<figure><img src="screenshots/01-compose-ps.png" alt="docker compose ps showing tp05-kafka running"><figcaption>The container tp05-kafka is up, with host port 9092 mapped to the container.</figcaption></figure>
+
+<h3>Topic description</h3>
+<figure><img src="screenshots/02-topic-describe.png" alt="Topic description with 3 partitions and replication factor 1"><figcaption>Three partitions, replication factor 1. Leader, Replicas and Isr are all 1, the only broker.</figcaption></figure>
+
+<h3>Producer and consumer output</h3>
+<div class="pair">
+<figure><img src="screenshots/03-producer.png" alt="Producer output"><figcaption>The producer sends one JSON event per second.</figcaption></figure>
+<figure><img src="screenshots/04-consumer.png" alt="Consumer output with alerts"><figcaption>The consumer prints each reading and an ALERT at 35°C or more. Values and timestamps match the producer.</figcaption></figure>
+</div>
+
+<h3>Consumer group offsets</h3>
+<figure><img src="screenshots/05-consumer-group.png" alt="Consumer group offsets"><figcaption>After the first run the group had read 11 + 7 + 12 = 30 events, with lag 0 on every partition. It shows no active members because the consumer was stopped, but Kafka keeps the offsets.</figcaption></figure>
+
+<h2>Further investigation</h2>
+
+<h3>Different group_id</h3>
+<p>A second consumer with <code>group_id="tp05-group-b"</code> replayed the stored events immediately, because a new group has no committed offsets and <code>auto_offset_reset="earliest"</code> applies. The original group printed nothing when restarted. Group B later showed a lag of 30 while the original group showed lag 0, so each group tracks its own progress over the same data.</p>
+<div class="pair">
+<figure><img src="screenshots/06-new-group.png" alt="New group replaying events"><figcaption>Group B replays old events.</figcaption></figure>
+<figure><img src="screenshots/07-group-b-offsets.png" alt="Group B offsets with lag"><figcaption>Group B offsets and lag.</figcaption></figure>
+</div>
+<figure><img src="screenshots/07-group-compare.png" alt="Offsets of the original group"><figcaption>Offsets of the original group, for comparison.</figcaption></figure>
+
+<h3>Two consumers in the same group</h3>
+<p>Kafka split the three partitions: one consumer owned partitions 0 and 1, the other owned partition 2. Each event appeared in only one terminal.</p>
+<figure><img src="screenshots/08-same-group-terminals.png" alt="Two consumers printing different partitions"><figcaption>The left consumer reads partition 2, the middle one reads partitions 0 and 1, the producer is on the right.</figcaption></figure>
+<figure><img src="screenshots/08-same-group-describe.png" alt="Group describe with two consumer IDs"><figcaption>Two different CONSUMER-IDs, each owning different partitions.</figcaption></figure>
+
+<h3>One partition versus three</h3>
+<p>A topic <code>campus-sensors-1p</code> with one partition was read by two consumers of the same group. Only one received events (all <code>partition=0</code>, offsets 0 to 29 in order) and the other stayed silent, because a partition can belong to only one consumer of a group.</p>
+<div class="wrap"><table>
+<tr><th></th><th>1 partition</th><th>3 partitions</th></tr>
+<tr><td>Ordering</td><td>Total order in the topic</td><td>Order only within each partition</td></tr>
+<tr><td>Parallelism in one group</td><td>At most 1 active consumer</td><td>Up to 3 active consumers</td></tr>
+<tr><td>Distribution</td><td>All events in partition 0</td><td>Spread over partitions 0, 1, 2</td></tr>
+</table></div>
+<p>What does not change on one broker: the single broker leads every partition, replication factor stays 1 (no fault tolerance), and throughput is still limited to one machine.</p>
+<figure><img src="screenshots/11-topic-1-partition.png" alt="One-partition topic description"><figcaption>The topic with one partition.</figcaption></figure>
+<div class="pair">
+<figure><img src="screenshots/12-one-partition-terminals.png" alt="One consumer active and one silent"><figcaption>The middle consumer receives events, the left one stays silent.</figcaption></figure>
+<figure><img src="screenshots/12-one-partition-describe.png" alt="Group describe with one consumer ID"><figcaption>Only one consumer owns partition 0.</figcaption></figure>
+</div>
+
+<h3>Running average</h3>
+<p>The consumer keeps only a total and a count, so it uses constant memory on an endless stream. After 90 events the average was 29.86°C, close to the theoretical mean of 30°C for temperatures uniform between 18 and 42.</p>
+<figure><img src="screenshots/09-running-average.png" alt="Running average output"><figcaption>Running average after replaying 90 events.</figcaption></figure>
+
+<h3>campus_building field and filter</h3>
+<p>Each event now has a <code>campus_building</code> field (A, B or C), and the consumer prints only building A. The filtering happens in the consumer: Kafka still delivers every event. Old events without the field are skipped with <code>event.get()</code>.</p>
+<figure><img src="screenshots/10-campus-building.png" alt="Only building A events printed"><figcaption>Every printed line shows building A.</figcaption></figure>
+
+<h3>100 events</h3>
+<p>The behavior is the same as with 30 events, only the run is longer. At the end the group had lag 0 and offsets 84 + 82 + 84 = 250, which matches all the events sent during the lab.</p>
+<div class="pair">
+<figure><img src="screenshots/13-100-events.png" alt="End of the 100-event run"><figcaption>Producer and consumer both end at event 100.</figcaption></figure>
+<figure><img src="screenshots/13-100-events-offsets.png" alt="Offsets after 100 events"><figcaption>Offsets total 250, lag 0.</figcaption></figure>
+</div>
+
+<h2>Answers to the report questions</h2>
+<dl>
+<dt>1. What problem does Kafka solve?</dt>
+<dd>It decouples the systems that produce data from those that use it. Producers publish events without knowing the readers, several applications read the same events at their own pace, events are kept for a retention period (7 days by default), and consumers can replay them. This replaces static files and direct connections between services.</dd>
+
+<dt>2. Definitions</dt>
+<dd><b>Producer</b>: publishes events. <b>Consumer</b>: reads events. <b>Broker</b>: Kafka server that stores partitions and serves clients. <b>Topic</b>: named category of events. <b>Partition</b>: ordered, append-only log that is part of a topic. <b>Offset</b>: position number of an event in a partition. <b>Consumer group</b>: consumers sharing the reading of a topic, each partition going to at most one member at a time.</dd>
+
+<dt>3. Topic versus partition</dt>
+<dd>A topic is the logical stream. A partition is a physical, ordered part of it with its own offsets. Order is guaranteed only inside a partition. Here, the 30 events were split as 11, 7 and 12 across three partitions.</dd>
+
+<dt>4. Why <code>auto_offset_reset='earliest'</code>, and when does it apply?</dt>
+<dd>It makes a consumer start from the beginning of the partition when its group has no valid committed offset, so it does not miss events already stored. Once the group has committed offsets, the setting is ignored and the consumer resumes where it stopped. In the lab, the new group replayed old events and the existing group did not.</dd>
+
+<dt>5. Purpose of the group ID, and a new one</dt>
+<dd>The group ID identifies the group whose offsets Kafka stores, and defines who shares the partitions. Same ID: events are shared between consumers. Different ID: each group receives all events. A new ID has no offsets, so with <code>earliest</code> it reads the topic from the start.</dd>
+
+<dt>6. Why JSON, and one limitation</dt>
+<dd>JSON is readable, language-independent and easy to parse in Python, with no schema setup. Its limitation is that no schema or types are enforced, so a changed or missing field can break consumers silently (old events lacked <code>campus_building</code>). It is also larger and slower than Avro or Protobuf.</dd>
+
+<dt>7. Docker Compose versus manual start</dt>
+<dd>One declarative file holds the image version, ports, environment, volume and restart policy, and one command starts or removes everything. It avoids long <code>docker run</code> commands, can be versioned in Git, and gives the same environment on every machine without installing Java or Kafka.</dd>
+
+<dt>8. Limits of the single-broker setup</dt>
+<dd>No fault tolerance (replication factor 1), no high availability or controller redundancy, throughput and storage limited to one machine, no security (PLAINTEXT, no authentication or TLS), and an advertised listener that works only on the local machine. Replication is also not a backup.</dd>
+
+<dt>9. Evidence</dt>
+<dd>See the running container, topic description, producer output and consumer output in the Evidence section.</dd>
+</dl>
+
+<h2>Problems and solutions</h2>
+<div class="wrap"><table>
+<tr><th>Problem</th><th>Cause</th><th>Solution</th></tr>
+<tr><td>Cannot connect to the Docker API</td><td>Docker Desktop was not running</td><td>Started Docker Desktop and waited for the engine</td></tr>
+<tr><td>Timeout reaching registry-1.docker.io</td><td>Temporary network problem</td><td>Ran <code>docker pull apache/kafka:3.9.1</code> until it finished</td></tr>
+<tr><td><code>No module named 'kafka.vendor.six.moves'</code></td><td><code>kafka-python 2.0.2</code> does not work on Python 3.12.10</td><td>Upgraded to <code>kafka-python==3.0.12</code></td></tr>
+<tr><td>DeprecationWarning on <code>value_deserializer</code></td><td>kafka-python 3.x prefers a serializer class</td><td>Harmless, plain functions still work</td></tr>
+<tr><td>Restarted consumer printed nothing</td><td>The group had already committed its offsets</td><td>Expected: it prints when new events arrive, and a new group_id replays</td></tr>
+<tr><td>Lost indentation and typos in the PDF</td><td>Copy from PDF</td><td>Rewrote the files by hand, topic name <code>campus-sensors</code></td></tr>
+</table></div>
+
+<h2>Cleanup</h2>
+<pre>docker compose down        # keeps the data volume
+docker compose down -v     # also deletes the stored messages</pre>
+
+</main>
+</body>
+</html>
